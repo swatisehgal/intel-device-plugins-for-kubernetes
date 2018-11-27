@@ -49,26 +49,29 @@ const (
 )
 
 type devicePlugin struct {
-	maxDevices      int
-	pciDriverDir    string
-	pciDeviceDir    string
-	kernelVfDrivers []string
-	dpdkDriver      string
+	maxDevices         int
+	pciDriverDir       string
+	pciDeviceDir       string
+	kernelVfDrivers    []string
+	dpdkDriver         string
+	perDeviceDiscovery bool
 }
 
-func newDevicePlugin(pciDriverDir, pciDeviceDir string, maxDevices int, kernelVfDrivers []string, dpdkDriver string) *devicePlugin {
+func newDevicePlugin(pciDriverDir, pciDeviceDir string, maxDevices int, kernelVfDrivers []string, dpdkDriver string, perDeviceDiscovery bool) *devicePlugin {
 	return &devicePlugin{
-		maxDevices:      maxDevices,
-		pciDriverDir:    pciDriverDir,
-		pciDeviceDir:    pciDeviceDir,
-		kernelVfDrivers: kernelVfDrivers,
-		dpdkDriver:      dpdkDriver,
+		maxDevices:         maxDevices,
+		pciDriverDir:       pciDriverDir,
+		pciDeviceDir:       pciDeviceDir,
+		kernelVfDrivers:    kernelVfDrivers,
+		dpdkDriver:         dpdkDriver,
+		perDeviceDiscovery: perDeviceDiscovery,
 	}
 }
 
 func (dp *devicePlugin) Scan(notifier deviceplugin.Notifier) error {
 	for {
 		devTree, err := dp.scan()
+		fmt.Printf("devTree is %v\n", devTree)
 		if err != nil {
 			return err
 		}
@@ -114,7 +117,7 @@ func (dp *devicePlugin) getDpdkDeviceNames(id string) ([]string, error) {
 	if err != nil {
 		return []string{}, err
 	}
-	fmt.Printf("%s device: corresponding DPDK device detected is %s\n", id, dpdkDeviceName)
+	//fmt.Printf("%s device: corresponding DPDK device detected is %s\n", id, dpdkDeviceName)
 
 	switch dp.dpdkDriver {
 	// TODO: case "pci-generic" and "kernel":
@@ -201,7 +204,14 @@ func isValidDpdkDeviceDriver(dpdkDriver string) bool {
 }
 func isValidVfDeviceID(vfDevID string) bool {
 	switch vfDevID {
-	case "0442", "0443", "37c9", "19e3":
+	case "0443", "37c9", "19e3", "6f55":
+		return true
+	}
+	return false
+}
+func isValidPfDeviceID(vfDevID string) bool {
+	switch vfDevID {
+	case "0435", "37c8", "19e2", "6f54":
 		return true
 	}
 	return false
@@ -210,61 +220,167 @@ func isValidVfDeviceID(vfDevID string) bool {
 func (dp *devicePlugin) scan() (deviceplugin.DeviceTree, error) {
 	devTree := deviceplugin.NewDeviceTree()
 
-	for _, driver := range append(dp.kernelVfDrivers, dp.dpdkDriver) {
-		files, err := ioutil.ReadDir(path.Join(dp.pciDriverDir, driver))
-		if err != nil {
-			fmt.Printf("Can't read sysfs for driver as Driver %s is not available: Skipping\n", driver)
-			continue
-		}
-
-		n := 0
-		for _, file := range files {
-			if !strings.HasPrefix(file.Name(), "0000:") {
-				continue
-			}
-			vfdevID, err := dp.getDeviceID(file.Name())
+	if !dp.perDeviceDiscovery {
+		for _, driver := range append(dp.kernelVfDrivers, dp.dpdkDriver) {
+			files, err := ioutil.ReadDir(path.Join(dp.pciDriverDir, driver))
 			if err != nil {
-				return nil, errors.Wrapf(err, "Cannot obtain deviceID for the device with PCI address: %s", file.Name())
-			}
-			if !isValidVfDeviceID(vfdevID) {
+				fmt.Printf("Can't read sysfs for driver as Driver %s is not available: Skipping\n", driver)
 				continue
 			}
-			n = n + 1 // increment after all junk got filtered out
 
-			if n > dp.maxDevices {
-				break
-			}
+			n := 0
+			for _, file := range files {
+				if !strings.HasPrefix(file.Name(), "0000:") {
+					continue
+				}
+				vfdevID, err := dp.getDeviceID(file.Name())
+				if err != nil {
+					return nil, errors.Wrapf(err, "Cannot obtain deviceID for the device with PCI address: %s", file.Name())
+				}
+				if !isValidVfDeviceID(vfdevID) {
+					continue
+				}
+				n = n + 1 // increment after all junk got filtered out
 
-			vfpciaddr := strings.TrimPrefix(file.Name(), "0000:")
+				if n > dp.maxDevices {
+					break
+				}
 
-			// initialize newly found devices which aren't bound to DPDK driver yet
-			if driver != dp.dpdkDriver {
-				err = dp.bindDevice(vfpciaddr)
+				vfpciaddr := strings.TrimPrefix(file.Name(), "0000:")
+
+				// initialize newly found devices which aren't bound to DPDK driver yet
+				if driver != dp.dpdkDriver {
+					err = dp.bindDevice(vfpciaddr)
+					if err != nil {
+						return nil, err
+					}
+				}
+
+				devNodes, err := dp.getDpdkDeviceNames(vfpciaddr)
 				if err != nil {
 					return nil, err
 				}
-			}
+				devMounts, err := dp.getDpdkMountPaths(vfpciaddr)
+				if err != nil {
+					return nil, err
+				}
+				deviceName := strings.TrimSuffix(namespace, ".intel.com")
 
-			devNodes, err := dp.getDpdkDeviceNames(vfpciaddr)
+				devinfo := deviceplugin.DeviceInfo{
+					State:  pluginapi.Healthy,
+					Nodes:  devNodes,
+					Mounts: devMounts,
+					Envs: map[string]string{
+						fmt.Sprintf("%s%d", strings.ToUpper(deviceName), n): file.Name(),
+					},
+				}
+
+				devTree.AddDevice("generic", vfpciaddr, devinfo)
+			}
+		}
+	} else {
+		for _, driver := range append(dp.kernelVfDrivers, dp.dpdkDriver) {
+			//if driver != dp.dpdkDriver
+			pfDriver := strings.TrimSuffix(driver, "vf")
+
+			files, err := ioutil.ReadDir(path.Join(dp.pciDriverDir, pfDriver))
 			if err != nil {
-				return nil, err
+				fmt.Printf("Can't read sysfs for driver as Driver %s is not available: Skipping\n", driver)
+				continue
 			}
-			devMounts, err := dp.getDpdkMountPaths(vfpciaddr)
-			if err != nil {
-				return nil, err
+			n := 0
+			vfPerPf := 1
+			pfId := ""
+			if pfDriver == "c6xx" {
+				vfPerPf = 3
 			}
-			deviceName := strings.TrimSuffix(namespace, ".intel.com")
+			for _, file := range files {
 
-			devinfo := deviceplugin.DeviceInfo{
-				State:  pluginapi.Healthy,
-				Nodes:  devNodes,
-				Mounts: devMounts,
-				Envs: map[string]string{
-					fmt.Sprintf("%s%d", strings.ToUpper(deviceName), n): file.Name(),
-				},
-			}
+				if !strings.HasPrefix(file.Name(), "0000:") {
+					continue
+				}
+				fmt.Printf("The pfId  is %v\n", pfId)
+				fmt.Printf("The file  is %v\n", file.Name())
+				if vfPerPf == 3 {
+					fmt.Printf("vfPerPf ==3:The vfPerPf  is %v\n", vfPerPf)
+					pfId = strings.TrimPrefix(strings.TrimSuffix(file.Name(), ":00.0"), "0000:")
+					vfPerPf = vfPerPf - 1
+				} else if vfPerPf != 1 {
+					fmt.Printf("vfPerPf !=1:The vfPerPf  is %v\n", vfPerPf)
+					vfPerPf = vfPerPf - 1
+				} else {
+					fmt.Printf("else:The vfPerPf  is %v\n", vfPerPf)
+					if pfId == "" {
+						pfId = strings.TrimPrefix(strings.TrimSuffix(file.Name(), ":00.0"), "0000:")
+					}
+					vfPerPf = 1
+					if pfDriver == "c6xx" {
+						vfPerPf = 3
+					}
+				}
+				//fmt.Printf("pfId:%v\n", pfId)
 
-			devTree.AddDevice("generic", vfpciaddr, devinfo)
+				pfdevID, err := dp.getDeviceID(file.Name())
+				if err != nil {
+					return nil, errors.Wrapf(err, "Cannot obtain deviceID for the device with PCI address: %s", file.Name())
+				}
+				if !isValidPfDeviceID(pfdevID) {
+					continue
+				}
+				pfPciPath := path.Join(dp.pciDeviceDir, file.Name())
+				pfFiles, err := ioutil.ReadDir(pfPciPath)
+				if err != nil {
+					return nil, err
+				}
+				if len(pfFiles) == 0 {
+					return nil, errors.New("No devices found")
+				}
+				for _, pfFile := range pfFiles {
+					if !strings.HasPrefix(pfFile.Name(), "virtfn") {
+						continue
+					}
+					n = n + 1 // increment after all junk got filtered out
+
+					if n > dp.maxDevices {
+						break
+					}
+					fmt.Printf("The pfFile  is %v\n", pfFile.Name())
+					vfpath := path.Join(pfPciPath, pfFile.Name())
+					symlink, err := filepath.EvalSymlinks(vfpath)
+					if err != nil {
+						return nil, errors.WithStack(err)
+					}
+					vfpciadd := path.Base(symlink)
+					//fmt.Printf("The symlink  is %v\n", vfpciadd)
+					vfpciaddr := strings.TrimPrefix(vfpciadd, "0000:")
+					if driver != dp.dpdkDriver {
+						err = dp.bindDevice(vfpciaddr)
+						if err != nil {
+							return nil, err
+						}
+					}
+					devNodes, err := dp.getDpdkDeviceNames(vfpciaddr)
+					if err != nil {
+						return nil, err
+					}
+					devMounts, err := dp.getDpdkMountPaths(vfpciaddr)
+					if err != nil {
+						return nil, err
+					}
+					deviceName := strings.TrimSuffix(namespace, ".intel.com")
+
+					devinfo := deviceplugin.DeviceInfo{
+						State:  pluginapi.Healthy,
+						Nodes:  devNodes,
+						Mounts: devMounts,
+						Envs: map[string]string{
+							fmt.Sprintf("%s%d", strings.ToUpper(deviceName), n-1): vfpciaddr,
+						},
+					}
+					fmt.Printf("Adding device now pfId:%v,vfpciaddr:%v,devinfo%v\n", pfId, vfpciaddr, devinfo)
+					devTree.AddDevice(pfId, vfpciaddr, devinfo)
+				}
+			}
 		}
 	}
 
@@ -276,6 +392,7 @@ func main() {
 	kernelVfDrivers := flag.String("kernel-vf-drivers", "dh895xccvf,c6xxvf,c3xxxvf,d15xxvf", "Comma separated VF Device Driver of the QuickAssist Devices in the system. Devices supported: DH895xCC,C62x,C3xxx and D15xx")
 	maxNumDevices := flag.Int("max-num-devices", 32, "maximum number of QAT devices to be provided to the QuickAssist device plugin")
 	debugEnabled := flag.Bool("debug", false, "enable debug output")
+	perDeviceDiscovery := flag.Bool("per-device-discovery", true, "enable perDeviceDiscovery ")
 	flag.Parse()
 	fmt.Println("QAT device plugin started")
 
@@ -296,7 +413,7 @@ func main() {
 		}
 	}
 
-	plugin := newDevicePlugin(pciDriverDirectory, pciDeviceDirectory, *maxNumDevices, kernelDrivers, *dpdkDriver)
+	plugin := newDevicePlugin(pciDriverDirectory, pciDeviceDirectory, *maxNumDevices, kernelDrivers, *dpdkDriver, *perDeviceDiscovery)
 	manager := deviceplugin.NewManager(namespace, plugin)
 	manager.Run()
 }

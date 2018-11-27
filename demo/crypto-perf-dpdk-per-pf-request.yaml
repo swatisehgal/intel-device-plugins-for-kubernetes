@@ -16,12 +16,14 @@ spec:
       requests:
         cpu: "3"
         memory: "128Mi"
-        qat.intel.com/generic: '4'
+        qat.intel.com/04: '4'
+        qat.intel.com/06: '4'
         hugepages-2Mi: "1Gi"
       limits:
         cpu: "3"
         memory: "128Mi"
-        qat.intel.com/generic: '4'
+        qat.intel.com/04: '4'
+        qat.intel.com/06: '4'
         hugepages-2Mi: "1Gi"
     securityContext:
       capabilities:

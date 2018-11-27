@@ -37,8 +37,13 @@ spec:
             configMapKeyRef:
               name: intel-qat-plugin-config
               key: DEBUG
+        - name: PER_PF_DISCOVERY
+          valueFrom:
+             configMapKeyRef:
+              name: intel-qat-plugin-config
+              key: PER_PF_DISCOVERY
         imagePullPolicy: IfNotPresent
-        command: ["/usr/bin/intel_qat_device_plugin", "-dpdk-driver", "$(DPDK_DRIVER)", "-kernel-vf-drivers", "$(KERNEL_VF_DRIVERS)", "-max-num-devices", "$(MAX_NUM_DEVICES)", "-debug", "$(DEBUG)"]
+        command: ["/usr/bin/intel_qat_device_plugin", "-dpdk-driver", "$(DPDK_DRIVER)", "-kernel-vf-drivers", "$(KERNEL_VF_DRIVERS)", "-max-num-devices", "$(MAX_NUM_DEVICES)", "-debug", "$(DEBUG)","-per-pf-discovery", "$(PER_PF_DISCOVERY)"]
         volumeMounts:
         - name: pcidir
           mountPath: /sys/bus/pci
