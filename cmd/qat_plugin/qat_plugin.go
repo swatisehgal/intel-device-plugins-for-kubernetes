@@ -203,7 +203,7 @@ func isValidDpdkDeviceDriver(dpdkDriver string) bool {
 }
 func isValidVfDeviceID(vfDevID string) bool {
 	switch vfDevID {
-	case "0443", "37c9", "19e3", "6f55",:
+	case "0443", "37c9", "19e3", "6f55":
 		return true
 	}
 	return false
